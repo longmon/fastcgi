@@ -12,6 +12,8 @@
 
 #define MAX_ACCEPT_EVENTS 128
 #define FCGI_KEEP_CONN 1
+#define FCGI_MAX_LENGTH oxffff
+#define FCGI_VERSION_1 1
 
 #define FCGI_REQUEST_COMPLETE    0
 #define FCGI_CANT_MPX_CONN       1
@@ -144,7 +146,6 @@ int socket_accept( int fid ) {
         n = epoll_wait( epoll_fd, events, MAX_ACCEPT_EVENTS, -1);
         for( i = 0; i < n; i++ ) {
             if( (events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) || (!events[i].events &EPOLLIN) ) {
-                perror("epoll wait error");
                 epoll_ctl( epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
                 close(events[i].data.fd);
                 continue;
@@ -203,43 +204,34 @@ int make_socket_nonblock( int fid ) {
 }
 
 int fcgi_read_handler( int fd ) {
-    fcgi_header fheader;
-    int dataLen = 0;
-    int requestID = -1;
-    fcgi_begin_request_body requestBody = {0};
-    memset(&fheader, 0, sizeof(fcgi_header));
-    if(safe_read( fd, &fheader, sizeof(fcgi_header) ) <= 0 ){
+    fcgi_header hdr;
+    unsigned char buf[FCGI_MAX_LENGTH+8];
+    int contentLength, paddingLength, hdrLength;
+    hdrLength = sizeof(fcgi_header);
+    memset(&hdr, 0, hdrLength);
+    int requestId = 0;
+
+    if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr->version < FCGI_VERSION_1 ){
         return -1;
     }
-    printf("header=>ver:%d,type:%d,contentLength0:%d, contentLength1:%d, len:%d\n", fheader.version, fheader.type, fheader.contentLengthB0, fheader.contentLengthB1, (fheader.contentLengthB1<<8)+fheader.contentLengthB0);    
-    requestID = (fheader.requestIdB1 << 8) +fheader.requestIdB0;
-    switch( fheader.type ) {
-        case FCGI_BEGIN_REQUEST:
-            if( safe_read(fd, &requestBody, sizeof(fcgi_begin_request_body)) <= 0 ){
-                return -2;
-            }
-            printf("request begin => role:%d,flag:%d\n", (requestBody.roleB1<<8)+requestBody.roleB0, requestBody.flags);
-            break;
-        case FCGI_PARAMS:
-            dataLen = (fheader.contentLengthB1<<8)+fheader.contentLengthB0;
-            char *paramData;
-            paramData = calloc(dataLen, sizeof(char));
-            if( safe_read(fd, paramData, dataLen ) < 0 ){
-                return -3;
-            }
-            printf("params => contentLengthB1:%d,contentLengthB0:%d,len:%d,content:%s\n", fheader.contentLengthB1, fheader.contentLengthB0,dataLen, paramData);
-            debug( paramData, "debug.php");
-            break;
-        case FCGI_STDIN:
-            printf("FCGI_STDIN\n");
-
-            break;
-        case FCGI_GET_VALUES:
-            printf("FCGI_GET_VALUES\n");
-            break;
-        default:
-            printf("end request ==========================================> \n\n");
-        return 0;
+    contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
+    paddingLength = hdr.paddingLength;
+    while( hdr.type == FCGI_STDIN && contentLength == 0 ) {
+        if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr->version < FCGI_VERSION_1 ){
+            return -1;
+        }
+        contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
+        paddingLength = hdr.paddingLength;
+    }
+    if( contentLegnth + paddingLength > FCGI_MAX_LENGTH ) {
+        return -1;
+    }
+    requestId = (hdr.requestIdB1 << 8 ) | hdr.requestIdB0;
+    if( hdr.type == FCGI_BEGIN_REQUEST && contentLength == sizeof( fcgi_begin_request_body ) ) {
+        if( safe_read( fd, buf, contentLength + paddingLength ) != contentLength + paddingLength ) {
+            return -1;
+        }
+        
     }
 
 }
@@ -278,6 +270,8 @@ int debug( const char *data, const char *logFile ) {
         perror("fopen");
         return -1;
     }
+    printf("data len %d\n", strlen(data));
     fwrite(data, sizeof(char),strlen(data), fp );
+    fwrite("\n", sizeof(char), 1, fp);
     fclose(fp);
 }
