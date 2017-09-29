@@ -12,7 +12,7 @@
 
 #define MAX_ACCEPT_EVENTS 128
 #define FCGI_KEEP_CONN 1
-#define FCGI_MAX_LENGTH oxffff
+#define FCGI_MAX_LENGTH 0xfff
 #define FCGI_VERSION_1 1
 
 #define FCGI_REQUEST_COMPLETE    0
@@ -71,21 +71,21 @@ int socket_accept( int fid );
 
 int make_socket_nonblock( int fid );
 
-int fcgi_read_handler( int fd );
+int fcgi_request_handler( int fd );
 
 int safe_read( int fd, void *buf, int len );
 
-int fcgi_response( int fd, const char *content );
+int fcgi_response( int fd, void *buf, int len );
 
-int debug( const char *data, const char *logFile );
+int debug( const char *logFile, void *data, int len );
+
+int fcgi_make_header( fcgi_header *hdr, unsigned char type, int reqid, int contentLength);
 
 int main() {
     int sck = socket_bind_listen("/tmp/fastcgi.sock");
     if( sck < 0 ){
         return -1;
     }
-    make_socket_nonblock( sck );
-
     if( socket_accept( sck ) < 0 ){
         return -2;
     }
@@ -123,7 +123,24 @@ int socket_bind_listen( const char *unix_socket_path ) {
     return fid;
 }
 
-int socket_accept( int fid ) {
+int socket_accept( int fd ) {
+    struct sockaddr_in inaddr;
+    socklen_t inlen;
+    inlen = sizeof(inaddr);
+    int sock_in;
+    for(;;){
+        sock_in = accept(fd, (struct sockaddr*)&inaddr, &inlen );
+        if( sock_in == -1 ){
+            perror("accept error");
+            close( fd );
+            continue;
+        }
+        fcgi_request_handler( sock_in );
+        close( fd );
+    }
+}
+
+int socket_accept1( int fid ) {
     int epoll_fd = 0, s;
     struct epoll_event event;
     struct epoll_event events[MAX_ACCEPT_EVENTS] = {0};
@@ -171,10 +188,10 @@ int socket_accept( int fid ) {
             }else {
                 int done = 0;
                 for(;;){
-                    if(fcgi_read_handler(events[i].data.fd) < 0 ) {
+                    if(fcgi_request_handler(events[i].data.fd) < 0 ) {
                         break;
                     }
-                    fcgi_response(events[i].data.fd, "Content-type: text/html\r\n\r\ni have a recved your msg!");
+                    //done = 1;
                 }
                 if( done == 1 ){
                     printf("socket read done\n");
@@ -203,7 +220,7 @@ int make_socket_nonblock( int fid ) {
     return 0;
 }
 
-int fcgi_read_handler( int fd ) {
+int fcgi_request_handler( int fd ) {
     fcgi_header hdr;
     unsigned char buf[FCGI_MAX_LENGTH+8];
     int contentLength, paddingLength, hdrLength;
@@ -211,29 +228,84 @@ int fcgi_read_handler( int fd ) {
     memset(&hdr, 0, hdrLength);
     int requestId = 0;
 
-    if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr->version < FCGI_VERSION_1 ){
+    if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
         return -1;
     }
     contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
     paddingLength = hdr.paddingLength;
     while( hdr.type == FCGI_STDIN && contentLength == 0 ) {
-        if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr->version < FCGI_VERSION_1 ){
+        if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
             return -1;
         }
         contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
         paddingLength = hdr.paddingLength;
     }
-    if( contentLegnth + paddingLength > FCGI_MAX_LENGTH ) {
+    if( contentLength + paddingLength > FCGI_MAX_LENGTH ) {
         return -1;
     }
+    printf("Header ========= > ver:%d,type:%d, contentLength:%d, requestID:%d\n", hdr.version, hdr.type, (hdr.contentLengthB1 << 8)+hdr.contentLengthB0, (hdr.requestIdB1 << 8)+hdr.requestIdB0);
     requestId = (hdr.requestIdB1 << 8 ) | hdr.requestIdB0;
     if( hdr.type == FCGI_BEGIN_REQUEST && contentLength == sizeof( fcgi_begin_request_body ) ) {
-        if( safe_read( fd, buf, contentLength + paddingLength ) != contentLength + paddingLength ) {
+        if( safe_read( fd, buf, contentLength + paddingLength ) != (contentLength + paddingLength) ) {
             return -1;
         }
+        int role = (((fcgi_begin_request_body*)buf)->roleB1 << 8) | ((fcgi_begin_request_body*)buf)->roleB0;
+        printf("Begin Request =========== > role:%d, flag:%d\n", role, ((fcgi_begin_request_body*)buf)->flags );
         
-    }
+        //======================================
+        //****to do deal with request role*****
+        //======================================
 
+        if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
+            return -1;
+        }
+        contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
+        paddingLength = hdr.paddingLength;
+
+        while( hdr.type == FCGI_PARAMS && contentLength > 0 ){
+            if( contentLength + paddingLength > FCGI_MAX_LENGTH ){
+                return -1;
+            }
+            if( safe_read(fd, buf, contentLength+paddingLength) != contentLength+paddingLength ) {
+                return -1;
+            }
+            printf("CCGI_PARAMS =========== > buf:%s\n", buf);
+
+            debug("debug.php", buf, contentLength+paddingLength );
+            
+            if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
+                return -1;
+            }
+            contentLength = (hdr.contentLengthB1 << 8) | hdr.contentLengthB0;
+            paddingLength = hdr.paddingLength;
+        }
+        printf("===================== End request ==================\n========================= Response output ==================\n");
+        fcgi_header rheader;
+        memset( &rheader, 0, sizeof(fcgi_header) );
+        char *msgBody = "Content-type: text/html\r\n\r\ni have a recved your msg!";
+        fcgi_make_header( &rheader, FCGI_STDOUT, requestId, strlen(msgBody) );
+        fcgi_response(fd, (void *)&rheader, sizeof(fcgi_header) );
+        fcgi_response( fd, msgBody, strlen(msgBody));
+
+        fcgi_end_request_body end_request_body;
+        memset(&end_request_body, 0, sizeof(fcgi_end_request_body));
+        end_request_body.protocolStatus = FCGI_REQUEST_COMPLETE;
+        end_request_body.appStatusB3 = 0;
+        end_request_body.appStatusB2 = 0;
+        end_request_body.appStatusB1 = 0;
+        end_request_body.appStatusB0 = 0;
+
+        fcgi_make_header( &rheader, (unsigned char)FCGI_END_REQUEST, requestId, sizeof(fcgi_end_request_body));
+
+        fcgi_response(fd, (void*)&end_request_body, sizeof(fcgi_end_request_body));
+
+        printf("========================= End output========================\n\n");
+    } else if( hdr.type == FCGI_GET_VALUES ){
+        printf("FCGI_GET_VALUES ===============> \n");
+    } else {
+        return 0;
+    }
+    return 0;
 }
 
 int safe_read( int fd, void *buf, int len ) {
@@ -253,25 +325,35 @@ int safe_read( int fd, void *buf, int len ) {
     return n;
 }
 
-int fcgi_response( int fd, const char *content ){
-    int len = strlen(content);
+int fcgi_response( int fd, void *buf, int len ){
     int count = 0;
-    if( (count = write(fd, content, len)) <= 0 ){
+    if( (count = write(fd, buf, len)) <= 0 ){
         perror("write error");
         return -1;
     }
     return count;
 }
 
-int debug( const char *data, const char *logFile ) {
+int debug( const char *logFile, void *data, int len ) {
     FILE *fp;
     fp = fopen(logFile,"a+");
     if( !fp ) {
         perror("fopen");
         return -1;
     }
-    printf("data len %d\n", strlen(data));
-    fwrite(data, sizeof(char),strlen(data), fp );
+    fwrite(data, sizeof(char), len, fp );
     fwrite("\n", sizeof(char), 1, fp);
     fclose(fp);
+}
+
+int fcgi_make_header( fcgi_header *hdr, unsigned char type, int reqid, int contentLength ) {
+    hdr->version    = FCGI_VERSION_1;
+    hdr->type       = type;
+    hdr->requestIdB1= (reqid >> 8) & 0xff;
+    hdr->requestIdB0= reqid & 0xff;
+    hdr->contentLengthB1 = (contentLength >> 8) & 0xff;
+    hdr->contentLengthB0 = contentLength & 0xff;
+    hdr->paddingLength = 0;
+    hdr->reserved = 0;
+    return 0;
 }
