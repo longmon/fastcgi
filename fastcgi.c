@@ -9,88 +9,7 @@
 #include <netinet/in.h>
 #include <stddef.h>
 #include <limits.h>
-
-#define MAX_ACCEPT_EVENTS 128
-#define FCGI_KEEP_CONN 1
-#define FCGI_MAX_LENGTH 0xfff
-#define FCGI_VERSION_1 1
-
-#define FCGI_REQUEST_COMPLETE    0
-#define FCGI_CANT_MPX_CONN       1
-#define FCGI_OVERLOADED          2
-#define FCGI_UNKNOWN_ROLE        3
-
-//请求类型
-#define FCGI_BEGIN_REQUEST		  1 /* [in]                              */
-#define FCGI_ABORT_REQUEST		  2 /* [in]  (not supported)             */
-#define FCGI_END_REQUEST		  3 /* [out]                             */
-#define FCGI_PARAMS				  4 /* [in]  environment variables       */
-#define FCGI_STDIN				  5 /* [in]  post data                   */
-#define FCGI_STDOUT				  6 /* [out] response                    */
-#define FCGI_STDERR				  7 /* [out] errors                      */
-#define FCGI_DATA				  8 /* [in]  filter data (not supported) */
-#define FCGI_GET_VALUES			  9 /* [in]                              */
-#define FCGI_GET_VALUES_RESULT	 10  /* [out]                             */
-//Webebtk 
-#define FCGI_RESPONDER   1
-#define FCGI_AUTHORIZER  2
-#define FCGI_FILTER      3
-
-typedef struct _fcgi_header {
-    unsigned char version;
-    unsigned char type;
-    unsigned char requestIdB1;
-    unsigned char requestIdB0;
-    unsigned char contentLengthB1;
-    unsigned char contentLengthB0;
-    unsigned char paddingLength;
-    unsigned char reserved;
-} fcgi_header;
-
-typedef struct 
-{
-    unsigned char roleB1;       //web服务器所期望php-fpm扮演的角色，具体取值下面有
-    unsigned char roleB0;
-    unsigned char flags;        //确定php-fpm处理完一次请求之后是否关闭
-    unsigned char reserved[5];  //保留字段
-} fcgi_begin_request_body;
-
-typedef struct 
-{
-    unsigned char appStatusB3;      //结束状态，0为正常
-    unsigned char appStatusB2;
-    unsigned char appStatusB1;
-    unsigned char appStatusB0;
-    unsigned char protocolStatus;   //协议状态
-    unsigned char reserved[3];
-} fcgi_end_request_body;
-
-int socket_bind_listen(const char *unix_socket_path );
-
-int socket_accept( int fid );
-
-int make_socket_nonblock( int fid );
-
-int fcgi_request_handler( int fd );
-
-int safe_read( int fd, void *buf, int len );
-
-int fcgi_response( int fd, void *buf, int len );
-
-int debug( const char *logFile, void *data, int len );
-
-int fcgi_make_header( fcgi_header *hdr, unsigned char type, int reqid, int contentLength);
-
-int main() {
-    int sck = socket_bind_listen("/tmp/fastcgi.sock");
-    if( sck < 0 ){
-        return -1;
-    }
-    if( socket_accept( sck ) < 0 ){
-        return -2;
-    }
-    return 0;
-}
+#include "fastcgi.h"
 
 int socket_bind_listen( const char *unix_socket_path ) {
     int fid, len, s;
@@ -130,80 +49,13 @@ int socket_accept( int fd ) {
     int sock_in;
     for(;;){
         sock_in = accept(fd, (struct sockaddr*)&inaddr, &inlen );
-        if( sock_in == -1 ){
-            perror("accept error");
-            close( fd );
-            continue;
-        }
-        fcgi_request_handler( sock_in );
-        close( fd );
-    }
-}
-
-int socket_accept1( int fid ) {
-    int epoll_fd = 0, s;
-    struct epoll_event event;
-    struct epoll_event events[MAX_ACCEPT_EVENTS] = {0};
-
-    epoll_fd = epoll_create1(0);
-    if( epoll_fd < 0 )
-    {
-        perror("create_epoll error");
-        return -1;
-    }
-    event.data.fd = fid;
-    event.events = EPOLLIN|EPOLLET;
-    s = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fid, &event);
-    if( s == -1 ) {
-        perror("epoll ctl error");
-        return -2;
-    }
-    for(;;) {
-        int n,i;
-        n = epoll_wait( epoll_fd, events, MAX_ACCEPT_EVENTS, -1);
-        for( i = 0; i < n; i++ ) {
-            if( (events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) || (!events[i].events &EPOLLIN) ) {
-                epoll_ctl( epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
-                close(events[i].data.fd);
-                continue;
-            } else if( events[i].data.fd == fid ) {
-                for(;;) {
-                    struct sockaddr_in inaddr;
-                    socklen_t inlen;
-                    inlen = sizeof(inaddr);
-                    int socket_in = accept( fid, (struct sockaddr*)&inaddr, &inlen);
-                    if( socket_in == -1 ){
-                        break;
-                    }
-                    make_socket_nonblock(socket_in);
-                    event.data.fd = socket_in;
-                    event.events = EPOLLIN|EPOLLET;
-                    if( epoll_ctl(epoll_fd, EPOLL_CTL_ADD, socket_in, &event ) < 0 ){
-                        perror("socket in add epoll error");
-                        close(socket_in);
-                        break;
-                    }
-                }
-                continue;
-            }else {
-                int done = 0;
-                for(;;){
-                    if(fcgi_request_handler(events[i].data.fd) < 0 ) {
-                        break;
-                    }
-                    //done = 1;
-                }
-                if( done == 1 ){
-                    printf("socket read done\n");
-                    epoll_ctl( epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
-                    close(events[i].data.fd);
-                }
-            }
+        if( sock_in > 0 ){
+            fcgi_request req;
+            memset(&req, 0, sizeof(fcgi_request));
+            req.fd = sock_in;
+            fcgi_request_handler( &req );
         }
     }
-    close(epoll_fd);
-    close(fid);
-    return 0;
 }
 
 int make_socket_nonblock( int fid ) {
@@ -220,87 +72,66 @@ int make_socket_nonblock( int fid ) {
     return 0;
 }
 
-int fcgi_request_handler( int fd ) {
-    fcgi_header hdr;
+int fcgi_request_handler( fcgi_request *req ) {
     unsigned char buf[FCGI_MAX_LENGTH+8];
     int contentLength, paddingLength, hdrLength;
     hdrLength = sizeof(fcgi_header);
-    memset(&hdr, 0, hdrLength);
-    int requestId = 0;
 
-    if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
+    if(safe_read( req->fd, &(req->hdr), hdrLength ) != hdrLength || req->hdr.version < FCGI_VERSION_1 ){
         return -1;
     }
-    contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
-    paddingLength = hdr.paddingLength;
-    while( hdr.type == FCGI_STDIN && contentLength == 0 ) {
-        if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
+    contentLength = (req->hdr.contentLengthB1 << 8)|req->hdr.contentLengthB0;
+    paddingLength = req->hdr.paddingLength;
+    while( req->hdr.type == FCGI_STDIN && contentLength == 0 ) {
+        if(safe_read( req->fd, &(req->hdr), hdrLength ) != hdrLength || req->hdr.version < FCGI_VERSION_1 ){
             return -1;
         }
-        contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
-        paddingLength = hdr.paddingLength;
+        contentLength = (req->hdr.contentLengthB1 << 8)| req->hdr.contentLengthB0;
+        paddingLength = req->hdr.paddingLength;
     }
     if( contentLength + paddingLength > FCGI_MAX_LENGTH ) {
         return -1;
     }
-    printf("Header ========= > ver:%d,type:%d, contentLength:%d, requestID:%d\n", hdr.version, hdr.type, (hdr.contentLengthB1 << 8)+hdr.contentLengthB0, (hdr.requestIdB1 << 8)+hdr.requestIdB0);
-    requestId = (hdr.requestIdB1 << 8 ) | hdr.requestIdB0;
-    if( hdr.type == FCGI_BEGIN_REQUEST && contentLength == sizeof( fcgi_begin_request_body ) ) {
-        if( safe_read( fd, buf, contentLength + paddingLength ) != (contentLength + paddingLength) ) {
+    req->reqid = (req->hdr.requestIdB1 << 8 ) | req->hdr.requestIdB0;
+    if( req->hdr.type == FCGI_BEGIN_REQUEST && contentLength == sizeof( fcgi_begin_request_body ) ) {
+        if( safe_read( req->fd, buf, contentLength + paddingLength ) != (contentLength + paddingLength) ) {
             return -1;
         }
-        int role = (((fcgi_begin_request_body*)buf)->roleB1 << 8) | ((fcgi_begin_request_body*)buf)->roleB0;
-        printf("Begin Request =========== > role:%d, flag:%d\n", role, ((fcgi_begin_request_body*)buf)->flags );
-        
+        req->role = (((fcgi_begin_request_body*)buf)->roleB1 << 8) | ((fcgi_begin_request_body*)buf)->roleB0;
+        req->keep = ((fcgi_begin_request_body*)buf)->flags & FCGI_KEEP_CONN;
+
         //======================================
         //****to do deal with request role*****
         //======================================
 
-        if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
+        if(safe_read( req->fd, &(req->hdr), hdrLength ) != hdrLength || req->hdr.version < FCGI_VERSION_1 ){
             return -1;
         }
-        contentLength = (hdr.contentLengthB1 << 8)|hdr.contentLengthB0;
-        paddingLength = hdr.paddingLength;
+        contentLength = (req->hdr.contentLengthB1 << 8) | req->hdr.contentLengthB0;
+        paddingLength = req->hdr.paddingLength;
 
-        while( hdr.type == FCGI_PARAMS && contentLength > 0 ){
+        while( req->hdr.type == FCGI_PARAMS && contentLength > 0 ){
             if( contentLength + paddingLength > FCGI_MAX_LENGTH ){
                 return -1;
             }
-            if( safe_read(fd, buf, contentLength+paddingLength) != contentLength+paddingLength ) {
+            if( safe_read(req->fd, buf, contentLength+paddingLength) != contentLength+paddingLength ) {
                 return -1;
             }
-            printf("CCGI_PARAMS =========== > buf:%s\n", buf);
-
             debug("debug.php", buf, contentLength+paddingLength );
             
-            if(safe_read( fd, &hdr, hdrLength ) != hdrLength || hdr.version < FCGI_VERSION_1 ){
+            if(safe_read( req->fd, &(req->hdr), hdrLength ) != hdrLength || req->hdr.version < FCGI_VERSION_1 ){
                 return -1;
             }
-            contentLength = (hdr.contentLengthB1 << 8) | hdr.contentLengthB0;
-            paddingLength = hdr.paddingLength;
+            contentLength = (req->hdr.contentLengthB1 << 8) | req->hdr.contentLengthB0;
+            paddingLength = req->hdr.paddingLength;
         }
-        printf("===================== End request ==================\n========================= Response output ==================\n");
-        fcgi_header rheader;
-        memset( &rheader, 0, sizeof(fcgi_header) );
+
         char *msgBody = "Content-type: text/html\r\n\r\ni have a recved your msg!";
-        fcgi_make_header( &rheader, FCGI_STDOUT, requestId, strlen(msgBody) );
-        fcgi_response(fd, (void *)&rheader, sizeof(fcgi_header) );
-        fcgi_response( fd, msgBody, strlen(msgBody));
+        fcgi_response( req, FCGI_STDOUT, msgBody, strlen(msgBody) );
 
-        fcgi_end_request_body end_request_body;
-        memset(&end_request_body, 0, sizeof(fcgi_end_request_body));
-        end_request_body.protocolStatus = FCGI_REQUEST_COMPLETE;
-        end_request_body.appStatusB3 = 0;
-        end_request_body.appStatusB2 = 0;
-        end_request_body.appStatusB1 = 0;
-        end_request_body.appStatusB0 = 0;
+        fcgi_end_request(req);
 
-        fcgi_make_header( &rheader, (unsigned char)FCGI_END_REQUEST, requestId, sizeof(fcgi_end_request_body));
-
-        fcgi_response(fd, (void*)&end_request_body, sizeof(fcgi_end_request_body));
-
-        printf("========================= End output========================\n\n");
-    } else if( hdr.type == FCGI_GET_VALUES ){
+    } else if( req->hdr.type == FCGI_GET_VALUES ){
         printf("FCGI_GET_VALUES ===============> \n");
     } else {
         return 0;
@@ -325,10 +156,17 @@ int safe_read( int fd, void *buf, int len ) {
     return n;
 }
 
-int fcgi_response( int fd, void *buf, int len ){
+int fcgi_response( fcgi_request *req, int type, void *buf, int len ){
+
+    if( !buf || !len ) {
+        return -1;
+    }
+    fcgi_make_header(&(req->hdr), type, req->reqid, len );
     int count = 0;
-    if( (count = write(fd, buf, len)) <= 0 ){
-        perror("write error");
+    if( (count = safe_write(req->fd, (void *)&(req->hdr), sizeof(req->hdr))) <= 0 ){
+        return -1;
+    }
+    if( (count = safe_write(req->fd, buf, len)) <= 0 ) {
         return -1;
     }
     return count;
@@ -357,3 +195,100 @@ int fcgi_make_header( fcgi_header *hdr, unsigned char type, int reqid, int conte
     hdr->reserved = 0;
     return 0;
 }
+
+void fcgi_end_request( fcgi_request *req ) 
+{
+    fcgi_end_req_record ereq_rec;
+    ereq_rec.body.protocolStatus = FCGI_REQUEST_COMPLETE;
+    ereq_rec.body.appStatusB3 = 0;
+    ereq_rec.body.appStatusB2 = 0;
+    ereq_rec.body.appStatusB1 = 0;
+    ereq_rec.body.appStatusB0 = 0;
+    fcgi_make_header( &(ereq_rec.hdr), FCGI_END_REQUEST, req->reqid, sizeof(fcgi_end_request_body) );
+    safe_write(req->fd, (void *)&ereq_rec, sizeof(ereq_rec));
+    if( !(req->keep & FCGI_KEEP_CONN) ) {
+        close(req->fd);
+    }
+    return;
+}
+
+int safe_write( int fd, void *buffer, int len )
+{
+    int count;
+    if( !buffer || len <= 0 ){
+        return -1;
+    }
+    count = write( fd, buffer, len );
+    if( count <= 0 ){
+        perror("write error");
+        return -2;
+    }
+    return count;
+}
+/**
+typedef struct {
+    unsigned char nameLengthB3;  // nameLengthB3  >> 7 == 1 
+    unsigned char nameLengthB2;
+    unsigned char nameLengthB1;
+    unsigned char nameLengthB0;
+    unsigned char valueLengthB3; //valueLengthB3 >> 7 == 1
+    unsigned char valueLengthB2;
+    unsigned char valueLengthB1;
+    unsigned char valueLengthB0;
+    unsigned char nameData[nameLength
+            ((B3 & 0x7f) << 24) + (B2 << 16) + (B1 << 8) + B0];
+    unsigned char valueData[valueLength
+            ((B3 & 0x7f) << 24) + (B2 << 16) + (B1 << 8) + B0];
+} FCGI_NameValuePair44;
+*/
+size_t fcgi_get_params_len( int *result, unsigned char *p, unsigned char *end ) 
+{
+    size_t ret;
+    if( p < end ) {
+        *result = p[0];//将第一字节赋值给result
+        if( *result >> 7 == 1 ) { //高位右移7位得到1，表明需要4字节，否则需要一字节
+            if( p + 3 < end ){ 
+                *result = (*result & 0x7f) << 24;
+                *result |= p[1] << 16;
+                *result |= p[2] << 8;
+                *result |= p[3];
+                ret = 4;
+            }
+        } else { //长度用一个字节表示了
+            ret = 1;
+        }
+    }
+    if( *result < 0 ){
+        ret = 0;
+    }
+    return ret;
+}
+
+int fcgi_get_params(unsigned char *p, unsigned char *end) {
+    int name_len;
+    int val_len;
+    sise_t bytes_consumed;
+    int ret = 1;
+    while( p < end ) {
+        bytes_consumed = fcgi_get_params_len( &name_len, p, end);
+        if( !bytes_consumed ){
+            ret = 0;
+            break;
+        }
+        printf("name_len:%d\n", name_len);
+        p += bytes_consumed;
+        bytes_consumed = fcgi_get_params_len( &val_len, p, end);
+        if( !bytes_consumed ){
+            ret = 0;
+            break;
+        }
+        printf("vaL_len:%d\n", val_len);
+        p += bytes_consumed;
+
+    }
+}
+
+int fcgi_get_params_name( unsigned char *name, int name_len, unsigned char *p, unsigned char *end ) {
+    
+}
+
