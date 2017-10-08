@@ -1,6 +1,17 @@
 #ifndef _FASTCGI_HEAD_
 #define _FASTCGI_HEAD_
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <stddef.h>
+#include <limits.h>
+#include <stddef.h>
+
     #define MAX_ACCEPT_EVENTS 128
     #define FCGI_KEEP_CONN 1
     #define FCGI_MAX_LENGTH 0xfff
@@ -71,8 +82,6 @@
 
     int socket_accept( int fid );
 
-    int make_socket_nonblock( int fid );
-
     int fcgi_request_handler( fcgi_request *req );
 
     int safe_read( int fd, void *buf, int len );
@@ -90,5 +99,7 @@
     size_t fcgi_get_params_len( int *result, unsigned char *p, unsigned char *end );
 
     int fcgi_get_params(unsigned char *p, unsigned char *end);
+
+    int fcgi_read_post(fcgi_request *req);
 
 #endif

@@ -1,0 +1,4 @@
+#!/bin/sh
+
+mv /tmp/fastcgi.sock /tmp/fastcgi.sock.a
+socat -t100 -v -x -lf /root/vmshare/fastcgi/socat UNIX-LISTEN:/tmp/fastcgi.sock,mode=777,reuseaddr,fork UNIX-CONNECT:/tmp/fastcgi.sock.a;

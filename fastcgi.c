@@ -1,14 +1,3 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/epoll.h>
-#include <sys/un.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <stddef.h>
-#include <limits.h>
 #include "fastcgi.h"
 
 int socket_bind_listen( const char *unix_socket_path ) {
@@ -54,23 +43,11 @@ int socket_accept( int fd ) {
             memset(&req, 0, sizeof(fcgi_request));
             req.fd = sock_in;
             fcgi_request_handler( &req );
+            //read_header(&req);
         }
     }
 }
 
-int make_socket_nonblock( int fid ) {
-    int flag = fcntl(fid, F_GETFL, 0);
-    if( flag < 0 ){
-        perror("fcntl get error");
-        return -1;
-    }
-    flag = flag | O_NONBLOCK;
-    if( fcntl( fid, F_SETFL, flag ) < 0 ) {
-        perror("fcntl set error");
-        return -2;
-    }
-    return 0;
-}
 
 int fcgi_request_handler( fcgi_request *req ) {
     unsigned char buf[FCGI_MAX_LENGTH+8];
@@ -82,17 +59,19 @@ int fcgi_request_handler( fcgi_request *req ) {
     }
     contentLength = (req->hdr.contentLengthB1 << 8)|req->hdr.contentLengthB0;
     paddingLength = req->hdr.paddingLength;
+
     while( req->hdr.type == FCGI_STDIN && contentLength == 0 ) {
         if(safe_read( req->fd, &(req->hdr), hdrLength ) != hdrLength || req->hdr.version < FCGI_VERSION_1 ){
             return -1;
         }
+
         contentLength = (req->hdr.contentLengthB1 << 8)| req->hdr.contentLengthB0;
         paddingLength = req->hdr.paddingLength;
     }
     if( contentLength + paddingLength > FCGI_MAX_LENGTH ) {
         return -1;
     }
-    req->reqid = (req->hdr.requestIdB1 << 8 ) | req->hdr.requestIdB0;
+    req->reqid = ( req->hdr.requestIdB1 << 8 ) | req->hdr.requestIdB0;
     if( req->hdr.type == FCGI_BEGIN_REQUEST && contentLength == sizeof( fcgi_begin_request_body ) ) {
         if( safe_read( req->fd, buf, contentLength + paddingLength ) != (contentLength + paddingLength) ) {
             return -1;
@@ -101,7 +80,7 @@ int fcgi_request_handler( fcgi_request *req ) {
         req->keep = ((fcgi_begin_request_body*)buf)->flags & FCGI_KEEP_CONN;
 
         //======================================
-        //****to do deal with request role*****
+        //**** deal with request role*****
         //======================================
 
         if(safe_read( req->fd, &(req->hdr), hdrLength ) != hdrLength || req->hdr.version < FCGI_VERSION_1 ){
@@ -109,15 +88,17 @@ int fcgi_request_handler( fcgi_request *req ) {
         }
         contentLength = (req->hdr.contentLengthB1 << 8) | req->hdr.contentLengthB0;
         paddingLength = req->hdr.paddingLength;
-
+        int len;
         while( req->hdr.type == FCGI_PARAMS && contentLength > 0 ){
             if( contentLength + paddingLength > FCGI_MAX_LENGTH ){
                 return -1;
             }
-            if( safe_read(req->fd, buf, contentLength+paddingLength) != contentLength+paddingLength ) {
+            len = contentLength+paddingLength;
+            if( safe_read(req->fd, buf, len) != len ) {
                 return -1;
             }
-            debug("debug.php", buf, contentLength+paddingLength );
+            debug("debug.php", buf, len );
+            fcgi_get_params(buf, buf+contentLength);
             
             if(safe_read( req->fd, &(req->hdr), hdrLength ) != hdrLength || req->hdr.version < FCGI_VERSION_1 ){
                 return -1;
@@ -126,6 +107,7 @@ int fcgi_request_handler( fcgi_request *req ) {
             paddingLength = req->hdr.paddingLength;
         }
 
+        fcgi_read_post(req);
         char *msgBody = "Content-type: text/html\r\n\r\ni have a recved your msg!";
         fcgi_response( req, FCGI_STDOUT, msgBody, strlen(msgBody) );
 
@@ -133,8 +115,10 @@ int fcgi_request_handler( fcgi_request *req ) {
 
     } else if( req->hdr.type == FCGI_GET_VALUES ){
         printf("FCGI_GET_VALUES ===============> \n");
-    } else {
-        return 0;
+    } else if( req->hdr.type == FCGI_STDIN ) {
+        printf("FCGI_STDIN =========== \n");
+    } else{
+        printf("fcgi_type:%d\n", req->hdr.type);
     }
     return 0;
 }
@@ -264,10 +248,12 @@ size_t fcgi_get_params_len( int *result, unsigned char *p, unsigned char *end )
     return ret;
 }
 
+
 int fcgi_get_params(unsigned char *p, unsigned char *end) {
     int name_len;
     int val_len;
-    sise_t bytes_consumed;
+    size_t bytes_consumed;
+    int eff_len = 0;
     int ret = 1;
     while( p < end ) {
         bytes_consumed = fcgi_get_params_len( &name_len, p, end);
@@ -275,20 +261,61 @@ int fcgi_get_params(unsigned char *p, unsigned char *end) {
             ret = 0;
             break;
         }
-        printf("name_len:%d\n", name_len);
         p += bytes_consumed;
         bytes_consumed = fcgi_get_params_len( &val_len, p, end);
         if( !bytes_consumed ){
             ret = 0;
             break;
         }
-        printf("vaL_len:%d\n", val_len);
         p += bytes_consumed;
-
+        char *nameData = NULL;
+        nameData = calloc(sizeof(char), name_len);
+        eff_len = fcgi_get_params_name(nameData, name_len, p, end );
+        if( eff_len > 0 ) {
+            p += eff_len;                                                                                                                                  
+        } else{
+            ret = 0;
+            break;
+        }
+        char *valData = NULL;
+        valData = calloc(sizeof(char), val_len);
+        eff_len = fcgi_get_params_name(valData, val_len, p, end);
+        if( eff_len > 0 ){
+            p += val_len;
+        }
     }
 }
 
 int fcgi_get_params_name( unsigned char *name, int name_len, unsigned char *p, unsigned char *end ) {
-    
+    int zero_found = 0;
+    int eff_len = 0;
+    unsigned char *tmp = p;
+    for(; p < end ; p++ ) {
+        eff_len++;
+        if( eff_len == name_len || *p == '\0' ){
+            break;
+        }
+    }
+    if( eff_len != name_len ) {
+        return 0;
+    }
+    memcpy(name, tmp, eff_len);
+    return eff_len;
 }
 
+int fcgi_read_post( fcgi_request *req) {
+    unsigned char *buffer;
+    int len;
+    int padding;
+    if( read(req->fd, &(req->hdr), sizeof(fcgi_header)) <= 0 ) {
+        perror("read header error");
+        return -1;
+    }
+    len = (req->hdr.contentLengthB1 << 8) | req->hdr.contentLengthB0;
+    padding = req->hdr.paddingLength;
+    buffer = calloc(sizeof( char ), len+padding );
+    if( read( req->fd, buffer, len+padding ) > 0 ){
+        printf("post data :%s\n", buffer);
+    }
+    return 0;
+}
