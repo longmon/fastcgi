@@ -11,6 +11,9 @@
 #include <stddef.h>
 #include <limits.h>
 #include <stddef.h>
+#include <sys/prctl.h>
+
+extern char **environ;
 
     #define MAX_ACCEPT_EVENTS 128
     #define FCGI_KEEP_CONN 1
@@ -101,5 +104,9 @@
     int fcgi_get_params(unsigned char *p, unsigned char *end);
 
     int fcgi_read_post(fcgi_request *req);
+
+    void daemonize();
+
+    void set_cli_title( int argc, char **argv, const char *title );
 
 #endif

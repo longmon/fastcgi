@@ -106,7 +106,7 @@ int fcgi_request_handler( fcgi_request *req ) {
             contentLength = (req->hdr.contentLengthB1 << 8) | req->hdr.contentLengthB0;
             paddingLength = req->hdr.paddingLength;
         }
-
+        // 读取POST参数
         fcgi_read_post(req);
         char *msgBody = "Content-type: text/html\r\n\r\ni have a recved your msg!";
         fcgi_response( req, FCGI_STDOUT, msgBody, strlen(msgBody) );
@@ -318,4 +318,71 @@ int fcgi_read_post( fcgi_request *req) {
         printf("post data :%s\n", buffer);
     }
     return 0;
+}
+void daemonize() {
+    int pid,n;
+    pid = fork();
+    if( pid > 0 ){
+        exit(0);
+    } else if( pid < 0 ) {
+        perror("fork");
+        exit(1);
+    }
+    setsid();
+    pid = fork();
+    if( pid > 0 ){
+        exit(0);
+    } else if( pid < 0 ){
+        perror("fork2");
+        exit(1);
+    }
+    chdir("/tmp");
+    umask(0);
+    return;
+}
+
+void set_cli_title( int argc, char **argv, const char *title ) {
+    char *arg_start;
+    char *arg_end;
+    char *env_start;
+    arg_start   = argv[0];
+    arg_end     = argv[argc-1] + strlen(argv[argc-1]) + 1;
+    env_start   = environ[0];
+    
+    int i;
+    int tlen = strlen( title ) + 1;
+    char *p;
+    for( i = 0; i < argc; i++ ){
+        argv[i] = strdup(argv[i]);
+    }
+    if( arg_end - arg_start < tlen && env_start == arg_end ) {
+        char *env_end = env_start;
+        for( i = 0; environ[i]; i++ ){
+            if( env_end == environ[i] ){
+                env_end = environ[i]+strlen(environ[i])+1;
+                environ[i] = strdup(environ[i]);
+            } else {
+                break;
+            }
+            arg_end     = env_end;
+            env_start   = NULL;
+        }
+    }
+    i = arg_end - arg_start;
+    if( tlen == i ) {
+        strcpy(arg_start, title);
+    } else if( tlen < i ){
+        strcpy( arg_start, title);
+        memset(arg_start+tlen, 0, i - tlen);
+        memset(arg_start, 0, i);
+        strcpy(arg_start + ( i + tlen ), title);
+    } else {
+        memcpy(arg_start, title, i - 1);
+        *arg_start  = '\0';
+    }
+    if( env_start ) {
+        p = strchr(arg_start, ' ');
+        if( p )  *p = '\0';
+    }
+
 }

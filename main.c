@@ -1,5 +1,8 @@
 #include "fastcgi.h"
-int main() {
+
+int main( int argc, char **argv) {
+    set_cli_title(argc, argv, "Fastcgi Master");
+    daemonize();
     int sck = socket_bind_listen("/tmp/fastcgi.sock");
     if( sck < 0 ){
         return -1;
